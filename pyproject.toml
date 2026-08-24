@@ -1,0 +1,13 @@
+[project]
+name = "comfyui-seedream-official-input"
+description = "Seedream node that uploads reference images at official BytePlus limits (6000px / 36MP) instead of ComfyUI's silent 2048x2048 downscale."
+version = "1.0.0"
+license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/NoNameFaces/ComfyUI-SeedreamOfficialInput"
+
+[tool.comfy]
+PublisherId = "nonamefaces"
+DisplayName = "Seedream Official Input"
+Icon = ""
