@@ -10,8 +10,12 @@ This node keeps the same API / billing, but prepares inputs to:
 
 from typing_extensions import override
 
+import numpy as np
+import scipy.ndimage
 import torch
 from comfy_api.latest import IO, ComfyExtension, Input
+import node_helpers
+from comfy_extras.nodes_mask import composite
 from comfy_api_nodes.apis.bytedance import (
     ImageTaskCreationResponse,
     Seedream4Options,
@@ -223,10 +227,123 @@ class SeedreamOfficialInput(ByteDanceSeedreamNodeV2):
         return IO.NodeOutput(torch.cat([await download_url_to_image_tensor(i) for i in urls]))
 
 
+def _mask_to_hw(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    mask = mask.reshape((-1, mask.shape[-2], mask.shape[-1])).float()
+    if mask.shape[-2] != height or mask.shape[-1] != width:
+        mask = torch.nn.functional.interpolate(
+            mask.unsqueeze(1), size=(height, width), mode="bilinear"
+        ).squeeze(1)
+    return mask.clamp(0.0, 1.0)
+
+
+def _grow_blur_mask(mask: torch.Tensor, grow: int, blur: int) -> torch.Tensor:
+    kernel = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+    out = []
+    for plane in mask.reshape((-1, mask.shape[-2], mask.shape[-1])):
+        arr = plane.detach().float().cpu().numpy()
+        for _ in range(abs(int(grow))):
+            if grow > 0:
+                arr = scipy.ndimage.grey_dilation(arr, footprint=kernel)
+            else:
+                arr = scipy.ndimage.grey_erosion(arr, footprint=kernel)
+        if blur > 0:
+            arr = scipy.ndimage.gaussian_filter(arr, sigma=float(blur) / 2.0)
+        out.append(torch.from_numpy(arr.astype(np.float32)))
+    return torch.stack(out, dim=0).to(device=mask.device).clamp(0.0, 1.0)
+
+
+class SeedreamEditComposite(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="SeedreamEditComposite",
+            display_name="Seedream 遮罩贴回原图",
+            category="image/ByteDance",
+            search_aliases=[
+                "seedream",
+                "composite",
+                "mask",
+                "inpaint",
+                "贴回",
+                "合成",
+                "遮罩",
+            ],
+            description=(
+                "Seedream has no mask input and redraws the whole image. This pastes the "
+                "generated result back onto the original using the mask (white = keep generated). "
+                "Empty / missing mask passes the generated image through unchanged."
+            ),
+            inputs=[
+                IO.Image.Input("original", tooltip="Unedited source image."),
+                IO.Image.Input("generated", tooltip="Seedream output."),
+                IO.Mask.Input(
+                    "mask",
+                    optional=True,
+                    tooltip="White = paste generated pixels. Empty mask = pass generated through.",
+                ),
+                IO.Mask.Input(
+                    "mask_2",
+                    optional=True,
+                    tooltip="Optional second mask, OR-merged with mask (e.g. LoadImage + Painter).",
+                ),
+                IO.Int.Input(
+                    "grow",
+                    default=8,
+                    min=-256,
+                    max=256,
+                    tooltip="Expand (positive) or shrink the mask before blending.",
+                ),
+                IO.Int.Input(
+                    "blur",
+                    default=12,
+                    min=0,
+                    max=256,
+                    tooltip="Gaussian blur on the mask edge, in pixels.",
+                ),
+            ],
+            outputs=[IO.Image.Output()],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        original: torch.Tensor,
+        generated: torch.Tensor,
+        mask=None,
+        mask_2=None,
+        grow: int = 8,
+        blur: int = 12,
+    ) -> IO.NodeOutput:
+        if original.ndim == 3:
+            original = original.unsqueeze(0)
+        if generated.ndim == 3:
+            generated = generated.unsqueeze(0)
+        dest_h, dest_w = int(original.shape[1]), int(original.shape[2])
+
+        combined = None
+        for candidate in (mask, mask_2):
+            if candidate is None:
+                continue
+            prepared = _mask_to_hw(candidate, dest_h, dest_w)
+            combined = prepared if combined is None else torch.maximum(combined, prepared)
+
+        if combined is None or float(combined.max()) < 1e-3:
+            return IO.NodeOutput(generated)
+
+        if grow != 0 or blur > 0:
+            combined = _grow_blur_mask(combined, grow, blur)
+
+        original, generated = node_helpers.image_alpha_fix(original, generated)
+        destination = original.clone().movedim(-1, 1)
+        source = generated.movedim(-1, 1)
+        output = composite(destination, source, 0, 0, combined, 1, True).movedim(1, -1)
+        return IO.NodeOutput(output)
+
+
 class SeedreamOfficialInputExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [SeedreamOfficialInput]
+        return [SeedreamOfficialInput, SeedreamEditComposite]
 
 
 async def comfy_entrypoint() -> SeedreamOfficialInputExtension:

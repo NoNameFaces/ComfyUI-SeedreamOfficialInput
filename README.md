@@ -24,6 +24,19 @@ Restart ComfyUI / Comfy Desktop.
 
 Uses the same Comfy Org / BytePlus API billing as the built-in Seedream node.
 
+## Seedream 遮罩贴回原图
+
+Seedream API has no mask socket and redraws the whole image. After generation, this node
+pastes the result back onto the original using the painted region:
+
+- white = keep Seedream pixels
+- empty / missing mask = pass the generated image through (full-image edit)
+- `mask` and `mask_2` are OR-merged, so Painter + LoadImage masks both work
+- generated image is resized to the original
+- `grow` / `blur` soften the seam
+
+Search: `Seedream 遮罩贴回原图`
+
 ## License
 
 MIT
